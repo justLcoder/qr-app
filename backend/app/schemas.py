@@ -1,9 +1,18 @@
+"""Pydantic schemas that define and validate the public API contract.
+
+Request schemas validate JSON before route handlers run, while response
+schemas define which values are sent back to the browser. They are distinct
+from SQLAlchemy models so database internals, such as password hashes, are not
+automatically exposed by the API.
+"""
+
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, HttpUrl
 from app.models import QRType
 
 
 class RegisterRequest(BaseModel):
+    # The 72-character maximum matches bcrypt's effective password limit.
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
 
@@ -18,6 +27,7 @@ class TokenResponse(BaseModel):
 
 
 class QRCreate(BaseModel):
+    # HttpUrl validates URLs at the API boundary before they reach the database.
     destination_url: HttpUrl
     type: QRType = QRType.static
     label: str | None = Field(default=None, max_length=120)

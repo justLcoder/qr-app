@@ -1,19 +1,33 @@
+/**
+ * The complete QR Studio browser application.
+ *
+ * App manages form/authentication/dashboard state, renders a client-side QR
+ * preview, and calls the FastAPI API for saved QR codes. The backend remains
+ * the source of truth for database records, downloads, redirects, and scans.
+ */
+
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import QRCode from "qrcode";
 import "./styles.css";
 
+// Vite exposes only environment variables prefixed with VITE_ to browser code.
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 type Kind = "static" | "dynamic";
 type Code = { id: number; type: Kind; destination_url: string; public_url: string; label: string | null; foreground: string; background: string; scan_count: number; is_active: boolean };
 
 async function request(path: string, options: RequestInit = {}, token?: string) {
+  // One small wrapper gives every API call a shared base URL, JSON header, and
+  // optional bearer token. It also turns API error responses into Error values
+  // that individual UI actions can display.
   const response = await fetch(`${API}${path}`, { ...options, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || "Something went wrong");
   return response.status === 204 ? null : response.json();
 }
 
 function App() {
+  // localStorage survives a browser refresh, allowing the dashboard to reload
+  // an existing access token without an immediate login prompt.
   const [token, setToken] = useState(localStorage.getItem("qr_token") || "");
   const [url, setUrl] = useState(""); const [kind, setKind] = useState<Kind>("static");
   const [label, setLabel] = useState(""); const [foreground, setForeground] = useState("#111827"); const [background, setBackground] = useState("#ffffff");
@@ -21,15 +35,25 @@ function App() {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [authMode, setAuthMode] = useState<"login" | "register">("register");
 
   const previewPayload = created?.public_url || url;
+  // Effects synchronize React state with external work. Here the QR library
+  // asynchronously converts the current URL/style into a data-URL preview.
   useEffect(() => { if (previewPayload) QRCode.toDataURL(previewPayload, { width: 300, margin: 2, color: { dark: foreground, light: background } }).then(setPreview).catch(() => setPreview("")); else setPreview(""); }, [previewPayload, foreground, background]);
+  // Once authentication state changes, fetch the codes owned by that user.
   useEffect(() => { if (token) loadCodes(); }, [token]);
   async function loadCodes() { try { setCodes(await request("/api/qr-codes", {}, token)); } catch { logout(); } }
   function logout() { localStorage.removeItem("qr_token"); setToken(""); setCodes([]); }
+  // preventDefault keeps the browser from navigating away when the HTML form
+  // submits; React instead sends the JSON request and updates state in place.
   async function createCode(e: React.FormEvent) { e.preventDefault(); setNotice(""); setCreated(null); try { const code = await request("/api/qr-codes", { method: "POST", body: JSON.stringify({ destination_url: url, type: kind, label: label || null, foreground, background }) }, token); setCreated(code); setNotice(kind === "dynamic" ? "Dynamic QR code created — its destination can be changed anytime." : "Static QR code created. Download it below."); if (token) loadCodes(); } catch (err) { setNotice(err instanceof Error ? err.message : "Could not create QR code"); } }
+  // authMode selects either /register or /login while both endpoints accept the
+  // same email/password JSON shape and return an access token.
   async function authenticate(e: React.FormEvent) { e.preventDefault(); try { const data = await request(`/api/auth/${authMode}`, { method: "POST", body: JSON.stringify({ email, password }) }); localStorage.setItem("qr_token", data.access_token); setToken(data.access_token); setNotice("You’re signed in."); } catch (err) { setNotice(err instanceof Error ? err.message : "Could not sign in"); } }
+  // Fetching a Blob allows authenticated image downloads because a normal link
+  // navigation cannot attach the in-memory Authorization header.
   async function download(format: "png" | "svg") { if (!created) return; try { const response = await fetch(`${API}/api/qr-codes/${created.id}/download?image_format=${format}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} }); if (!response.ok) throw new Error("Download failed"); const blob = await response.blob(); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `qr-${created.id}.${format}`; link.click(); URL.revokeObjectURL(link.href); } catch (err) { setNotice(err instanceof Error ? err.message : "Download failed"); } }
   async function editDestination(code: Code) { const next = prompt("New destination URL", code.destination_url); if (!next || next === code.destination_url) return; try { await request(`/api/qr-codes/${code.id}`, { method: "PATCH", body: JSON.stringify({ destination_url: next }) }, token); loadCodes(); } catch (err) { setNotice(err instanceof Error ? err.message : "Update failed"); } }
   async function remove(code: Code) { if (!confirm(`Delete ${code.label || "this QR code"}?`)) return; await request(`/api/qr-codes/${code.id}`, { method: "DELETE" }, token); loadCodes(); }
+  // useMemo avoids recomputing derived UI text unless its two inputs change.
   const callToAction = useMemo(() => kind === "dynamic" && !token ? "Sign in is required to create a dynamic code." : "", [kind, token]);
 
   return <main>
