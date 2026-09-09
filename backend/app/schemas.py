@@ -26,6 +26,10 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class GoogleCodeExchangeRequest(BaseModel):
+    code: str = Field(min_length=32, max_length=128)
+
+
 class QRCreate(BaseModel):
     # HttpUrl validates URLs at the API boundary before they reach the database.
     destination_url: HttpUrl

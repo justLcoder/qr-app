@@ -56,3 +56,13 @@ class ScanEvent(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     qr_code: Mapped[QRCode] = relationship(back_populates="scans")
+
+
+class OAuthLoginCode(Base):
+    """A short-lived, one-time code exchanged by the frontend after Google sign-in."""
+    __tablename__ = "oauth_login_codes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

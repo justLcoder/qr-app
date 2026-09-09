@@ -6,7 +6,12 @@ QR management endpoints, image downloads, analytics, and the public ``/q``
 route that records a dynamic scan before redirecting a visitor.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import hashlib
+import secrets
+from urllib.parse import urlencode
+import httpx
+import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -16,11 +21,12 @@ from app.core.config import get_settings
 from app.core.database import Base, engine, get_db
 from app.core.security import create_access_token, hash_password, verify_password
 from app.dependencies import current_user, optional_user
-from app.models import QRCode, QRType, ScanEvent, User
-from app.schemas import AnalyticsResponse, LoginRequest, QRCreate, QRResponse, QRUpdate, RegisterRequest, TokenResponse
+from app.models import OAuthLoginCode, QRCode, QRType, ScanEvent, User
+from app.schemas import AnalyticsResponse, GoogleCodeExchangeRequest, LoginRequest, QRCreate, QRResponse, QRUpdate, RegisterRequest, TokenResponse
 from app.services import make_short_code, render_qr
 
 settings = get_settings()
+GOOGLE_STATE_COOKIE = "google_oauth_state"
 app = FastAPI(title="QR Studio API", version="0.1.0")
 # CORS controls which browser origins may call this API. It is necessary in
 # development because Vite (5173) and FastAPI (8000) use different origins.
@@ -51,6 +57,14 @@ def owned_code(code_id: int, user: User, db: Session) -> QRCode:
     return code
 
 
+def google_configured() -> bool:
+    return bool(settings.google_client_id and settings.google_client_secret)
+
+
+def google_login_error(message: str) -> RedirectResponse:
+    return RedirectResponse(f"{settings.frontend_origin}/login?{urlencode({'google_error': message})}")
+
+
 @app.get("/health")
 def health(): return {"status": "ok"}
 
@@ -72,6 +86,68 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     # The same generic response avoids revealing whether an email exists.
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    return TokenResponse(access_token=create_access_token(str(user.id)))
+
+
+@app.get("/api/auth/google/login")
+def google_login():
+    if not google_configured():
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+    state = secrets.token_urlsafe(32)
+    params = urlencode({"client_id": settings.google_client_id, "redirect_uri": settings.google_redirect_uri, "response_type": "code", "scope": "openid email profile", "state": state, "prompt": "select_account"})
+    response = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+    response.set_cookie(GOOGLE_STATE_COOKIE, state, max_age=600, httponly=True, samesite="lax", secure=settings.public_base_url.startswith("https://"))
+    return response
+
+
+@app.get("/api/auth/google/callback")
+def google_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None, db: Session = Depends(get_db)):
+    if error or not code:
+        return google_login_error("Google sign-in was cancelled")
+    cookie_state = request.cookies.get(GOOGLE_STATE_COOKIE)
+    if not cookie_state or not state or not secrets.compare_digest(cookie_state, state):
+        return google_login_error("Google sign-in verification failed")
+    try:
+        token_response = httpx.post("https://oauth2.googleapis.com/token", data={"code": code, "client_id": settings.google_client_id, "client_secret": settings.google_client_secret, "redirect_uri": settings.google_redirect_uri, "grant_type": "authorization_code"}, timeout=10)
+        token_response.raise_for_status()
+        google_token = token_response.json()["id_token"]
+        signing_key = jwt.PyJWKClient("https://www.googleapis.com/oauth2/v3/certs").get_signing_key_from_jwt(google_token)
+        identity = jwt.decode(google_token, signing_key.key, algorithms=["RS256"], audience=settings.google_client_id, issuer=["https://accounts.google.com", "accounts.google.com"])
+        email = identity.get("email", "").lower()
+        if not email or not identity.get("email_verified"):
+            return google_login_error("A verified Google email is required")
+    except (httpx.HTTPError, jwt.PyJWTError, KeyError, ValueError):
+        return google_login_error("Google sign-in could not be verified")
+
+    user = db.query(User).filter_by(email=email).first()
+    if not user:
+        # Google has already verified this email. A random hash keeps the
+        # existing password-based schema intact without storing a usable password.
+        user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(48)))
+        db.add(user)
+        db.flush()
+    raw_exchange_code = secrets.token_urlsafe(32)
+    db.add(OAuthLoginCode(token_hash=hashlib.sha256(raw_exchange_code.encode()).hexdigest(), user_id=user.id, expires_at=datetime.now(timezone.utc) + timedelta(minutes=2)))
+    db.commit()
+    response = RedirectResponse(f"{settings.frontend_origin}/oauth/callback?{urlencode({'code': raw_exchange_code})}")
+    response.delete_cookie(GOOGLE_STATE_COOKIE)
+    return response
+
+
+@app.post("/api/auth/google/exchange", response_model=TokenResponse)
+def exchange_google_code(data: GoogleCodeExchangeRequest, db: Session = Depends(get_db)):
+    code_record = db.query(OAuthLoginCode).filter_by(token_hash=hashlib.sha256(data.code.encode()).hexdigest()).first()
+    if not code_record:
+        raise HTTPException(status_code=400, detail="Google sign-in has expired. Please try again.")
+    expires_at = code_record.expires_at if code_record.expires_at.tzinfo else code_record.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        db.delete(code_record); db.commit()
+        raise HTTPException(status_code=400, detail="Google sign-in has expired. Please try again.")
+    user = db.get(User, code_record.user_id)
+    db.delete(code_record)
+    db.commit()
+    if not user:
+        raise HTTPException(status_code=400, detail="Google account is unavailable")
     return TokenResponse(access_token=create_access_token(str(user.id)))
 
 

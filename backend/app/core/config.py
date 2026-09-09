@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"
     frontend_origin: str = "http://localhost:5173"
     access_token_minutes: int = 60 * 24 * 7
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
+    @property
+    def google_redirect_uri(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/api/auth/google/callback"
 
 
 @lru_cache

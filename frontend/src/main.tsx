@@ -33,11 +33,11 @@ function App() {
   useEffect(() => { localStorage.setItem("qr_language", language); }, [language]);
   function navigate(path: string) { window.history.pushState({}, "", path); setRoute(path); window.scrollTo(0, 0); }
   function logout() { localStorage.removeItem("qr_token"); setToken(""); navigate("/"); }
-  const isAuthPage = route === "/login" || route === "/signup";
+  const isAuthPage = route === "/login" || route === "/signup" || route === "/oauth/callback";
 
   return <main>
     <Header token={token} language={language} theme={theme} t={t} authPage={isAuthPage} onNavigate={navigate} onLanguage={setLanguage} onTheme={() => setTheme(theme === "light" ? "dark" : "light")} onLogout={logout} />
-    {isAuthPage ? <AuthPage mode={route === "/login" ? "login" : "register"} t={t} onAuthenticated={newToken => { localStorage.setItem("qr_token", newToken); setToken(newToken); navigate("/"); }} onNavigate={navigate} /> : <Home token={token} t={t} onNavigate={navigate} />}
+    {route === "/oauth/callback" ? <GoogleCallback t={t} onAuthenticated={newToken => { localStorage.setItem("qr_token", newToken); setToken(newToken); navigate("/"); }} /> : isAuthPage ? <AuthPage mode={route === "/login" ? "login" : "register"} t={t} onAuthenticated={newToken => { localStorage.setItem("qr_token", newToken); setToken(newToken); navigate("/"); }} onNavigate={navigate} /> : <Home token={token} t={t} onNavigate={navigate} />}
   </main>;
 }
 
@@ -62,9 +62,15 @@ function Home({ token, t, onNavigate }: { token: string; t: Copy; onNavigate: (p
 }
 
 function AuthPage({ mode, t, onAuthenticated, onNavigate }: { mode: AuthMode; t: Copy; onAuthenticated: (token: string) => void; onNavigate: (path: string) => void }) {
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [notice, setNotice] = useState("");
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [notice, setNotice] = useState(new URLSearchParams(window.location.search).get("google_error") || "");
   async function authenticate(event: React.FormEvent) { event.preventDefault(); setNotice(""); try { const data = await request(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify({ email, password }) }); onAuthenticated(data.access_token); } catch (error) { setNotice(error instanceof Error ? error.message : "Could not sign in"); } }
-  return <section className="auth-page"><form className="auth-card" onSubmit={authenticate}><p className="eyebrow">{t.authEyebrow}</p><h1>{mode === "login" ? t.welcomeBack : t.createAccount}</h1><p className="auth-description">{t.authDescription}</p><button type="button" className="google-button" onClick={() => setNotice(t.googleUnavailable)}><GoogleIcon />{t.google}</button><div className="divider"><span>{t.or}</span></div><label>{t.email}<input type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={event => setEmail(event.target.value)} /></label><label>{t.password}<input type="password" required minLength={8} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="••••••••" value={password} onChange={event => setPassword(event.target.value)} /></label>{notice && <p className="auth-notice">{notice}</p>}<button className="primary">{mode === "login" ? t.login : t.register}</button><button type="button" className="link" onClick={() => onNavigate(mode === "login" ? "/signup" : "/login")}>{mode === "login" ? t.needAccount : t.haveAccount}</button></form></section>;
+  return <section className="auth-page"><form className="auth-card" onSubmit={authenticate}><p className="eyebrow">{t.authEyebrow}</p><h1>{mode === "login" ? t.welcomeBack : t.createAccount}</h1><p className="auth-description">{t.authDescription}</p><label>{t.email}<input type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={event => setEmail(event.target.value)} /></label><label>{t.password}<input type="password" required minLength={8} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="••••••••" value={password} onChange={event => setPassword(event.target.value)} /></label>{notice && <p className="auth-notice">{notice}</p>}<button className="primary">{mode === "login" ? t.login : t.register}</button><div className="divider"><span>{t.or}</span></div><button type="button" className="google-button" onClick={() => window.location.assign(`${API}/api/auth/google/login`)}><GoogleIcon />{t.google}</button><button type="button" className="link" onClick={() => onNavigate(mode === "login" ? "/signup" : "/login")}>{mode === "login" ? t.needAccount : t.haveAccount}</button></form></section>;
+}
+
+function GoogleCallback({ t, onAuthenticated }: { t: Copy; onAuthenticated: (token: string) => void }) {
+  const [message, setMessage] = useState(t.googleSigningIn);
+  useEffect(() => { const code = new URLSearchParams(window.location.search).get("code"); if (!code) { setMessage(t.googleFailed); return; } request("/api/auth/google/exchange", { method: "POST", body: JSON.stringify({ code }) }).then(data => onAuthenticated(data.access_token)).catch(() => setMessage(t.googleFailed)); }, [onAuthenticated, t]);
+  return <section className="auth-page"><div className="auth-card auth-status"><p className="eyebrow">{t.authEyebrow}</p><h1>{message}</h1></div></section>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
