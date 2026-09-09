@@ -129,7 +129,7 @@ def google_callback(request: Request, code: str | None = None, state: str | None
     raw_exchange_code = secrets.token_urlsafe(32)
     db.add(OAuthLoginCode(token_hash=hashlib.sha256(raw_exchange_code.encode()).hexdigest(), user_id=user.id, expires_at=datetime.now(timezone.utc) + timedelta(minutes=2)))
     db.commit()
-    response = RedirectResponse(f"{settings.frontend_origin}/oauth/callback?{urlencode({'code': raw_exchange_code})}")
+    response = RedirectResponse(f"{settings.frontend_origin}/dashboard?{urlencode({'code': raw_exchange_code})}")
     response.delete_cookie(GOOGLE_STATE_COOKIE)
     return response
 
